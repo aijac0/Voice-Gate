@@ -1,6 +1,8 @@
 #include "audio/audio_pipeline.h"
+#include "audio/local_activation.h"
 #include "audio/pcm.h"
 
+#include <algorithm>
 #include <array>
 #include <iostream>
 #include <stdexcept>
@@ -29,7 +31,9 @@ public:
     {
         input = frame.samples;
         calls.push_back('I');
-        frame.samples.front().front() = 0.125F;
+        for (auto& channel : frame.samples) {
+            std::fill(channel.begin(), channel.end(), 0.125F);
+        }
     }
 
     std::vector<std::vector<float>> reference;
@@ -90,6 +94,9 @@ int main()
                     first.captures.front().frame.first_sample == 100ms &&
                     first.captures.front().timing.capture_time == 100ms,
                 "Return the processed samples with their original capture time");
+        SoundTrigger local_trigger(input, {0.25, 10ms});
+        require(!local_trigger.observe(first.captures.front().frame).sound_present,
+                "Activation observes processed audio after the sample level drops in the processor");
 
         feed(pipeline.callbacks(), 1, 2, 240, 110ms);
         const auto partial = pipeline.process(180ms);
