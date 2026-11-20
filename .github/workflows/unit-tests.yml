@@ -1,0 +1,51 @@
+name: Unit tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ctest:
+    name: CTest (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            webrtc: 'OFF'
+          - runner: macos-15
+            webrtc: 'ON'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build pinned WebRTC AudioProcessing
+        if: matrix.webrtc == 'ON'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          if ! command -v meson >/dev/null 2>&1; then
+            brew install meson
+          fi
+          ./tools/build_webrtc_apm.sh
+          printf 'PKG_CONFIG_PATH=%s\n' "$GITHUB_WORKSPACE/build/webrtc-apm/install/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Configure CMake
+        env:
+          WEBRTC: ${{ matrix.webrtc }}
+        run: cmake -S . -B build -DBUILD_TESTING=ON -DVOICE_GATE_ENABLE_WEBRTC="$WEBRTC"
+
+      - name: Build tests
+        run: cmake --build build --parallel
+
+      - name: Run CTest
+        run: ctest --test-dir build --output-on-failure --no-tests=error
