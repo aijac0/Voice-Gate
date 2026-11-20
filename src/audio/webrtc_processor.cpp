@@ -32,8 +32,9 @@ void channel_pointers(const AudioFrame& frame, const webrtc::StreamConfig& confi
 
 class WebRtcProcessor final : public AudioProcessor {
 public:
-    WebRtcProcessor(FrameFormat input, FrameFormat reference)
+    WebRtcProcessor(FrameFormat input, FrameFormat reference, EchoCancellation echo)
         : processor_(webrtc::AudioProcessingBuilder().Create()),
+          echo_enabled_(echo == EchoCancellation::enabled),
           input_config_(static_cast<int>(input.sample_rate), input.channels),
           reference_config_(static_cast<int>(reference.sample_rate), reference.channels),
           input_channels_(input.channels), reference_channels_(reference.channels),
@@ -42,12 +43,23 @@ public:
         if (!processor_) {
             throw std::runtime_error("Create the WebRTC audio processor");
         }
-        // The default configuration has the audio effects disabled.
-        processor_->ApplyConfig(webrtc::AudioProcessing::Config{});
+        webrtc::AudioProcessing::Config config{};
+        config.echo_canceller.enabled = echo_enabled_;
+        config.pipeline.multi_channel_render = echo_enabled_;
+        config.pipeline.multi_channel_capture = echo_enabled_;
+        processor_->ApplyConfig(config);
         webrtc::ProcessingConfig streams;
         streams.input_stream() = streams.output_stream() = input_config_;
         streams.reverse_input_stream() = streams.reverse_output_stream() = reference_config_;
         check(processor_->Initialize(streams), "Initialize WebRTC audio streams");
+    }
+
+    bool echo_cancellation_enabled() const noexcept override { return echo_enabled_; }
+
+    std::optional<std::chrono::milliseconds> estimated_echo_delay() override
+    {
+        const auto delay = processor_->GetStatistics().delay_ms;
+        return delay ? std::optional(std::chrono::milliseconds(*delay)) : std::nullopt;
     }
 
     void analyze_reference(const AudioFrame& frame) override
@@ -76,6 +88,7 @@ public:
 
 private:
     rtc::scoped_refptr<webrtc::AudioProcessing> processor_;
+    const bool echo_enabled_;
     webrtc::StreamConfig input_config_;
     webrtc::StreamConfig reference_config_;
     std::vector<const float*> input_channels_;
@@ -85,9 +98,10 @@ private:
 
 }  // namespace
 
-std::unique_ptr<AudioProcessor> make_webrtc_processor(FrameFormat input, FrameFormat reference)
+std::unique_ptr<AudioProcessor> make_webrtc_processor(FrameFormat input, FrameFormat reference,
+                                                      EchoCancellation echo)
 {
-    return std::make_unique<WebRtcProcessor>(input, reference);
+    return std::make_unique<WebRtcProcessor>(input, reference, echo);
 }
 
 }  // namespace voice_gate::audio

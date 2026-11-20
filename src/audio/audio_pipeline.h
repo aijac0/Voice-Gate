@@ -38,6 +38,7 @@ private:
     DeviceCallbacks source_;
     std::deque<ReferenceTiming> pending_references_;
     std::atomic<bool> queue_overflow_{false};
+    bool restart_required_{};
 };
 
 }  // namespace voice_gate::audio

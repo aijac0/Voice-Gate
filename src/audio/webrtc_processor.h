@@ -6,7 +6,9 @@
 
 namespace voice_gate::audio {
 
-[[nodiscard]] std::unique_ptr<AudioProcessor> make_webrtc_processor(FrameFormat input,
-                                                                    FrameFormat reference);
+enum class EchoCancellation { disabled, enabled };
+
+[[nodiscard]] std::unique_ptr<AudioProcessor> make_webrtc_processor(
+    FrameFormat input, FrameFormat reference, EchoCancellation echo = EchoCancellation::disabled);
 
 }  // namespace voice_gate::audio

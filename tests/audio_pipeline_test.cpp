@@ -12,14 +12,18 @@ namespace {
 
 class Processor final : public AudioProcessor {
 public:
+    explicit Processor(bool echo_enabled = false) : echo_enabled(echo_enabled) {}
+
+    bool echo_cancellation_enabled() const noexcept override { return echo_enabled; }
     void analyze_reference(const AudioFrame& frame) override
     {
         reference = frame.samples;
         calls.push_back('R');
     }
-    void set_stream_delay(std::chrono::milliseconds) override
+    void set_stream_delay(std::chrono::milliseconds delay) override
     {
-        throw std::logic_error("The effects-disabled processor needs no delay update");
+        calls.push_back('D');
+        submitted_delay = delay;
     }
     void process_capture(AudioFrame& frame) override
     {
@@ -31,6 +35,8 @@ public:
     std::vector<std::vector<float>> reference;
     std::vector<std::vector<float>> input;
     std::vector<char> calls;
+    std::optional<std::chrono::milliseconds> submitted_delay;
+    bool echo_enabled;
 };
 
 void fill(void*, const OutputBlock& block) noexcept
@@ -105,6 +111,29 @@ int main()
                     changed.input.size() == 1 && changed.reference.size() == 2 &&
                     changed.input[0].size() == 480 && changed.reference[1][0] == 0.25F,
                 "A restarted route must keep the original APM rate and layouts");
+
+        Processor echo(true);
+        AudioTime clock = 115ms;
+        AudioPipeline echo_pipeline({{48000, 1, SampleEncoding::float32},
+                                     {48000, 2, SampleEncoding::float32}, 480, 480},
+                                    input, reference, fixture, echo, [&] { return clock; }, 3);
+        feed(echo_pipeline.callbacks(), 1, 2, 480, 100ms);
+        const auto enabled = echo_pipeline.process(115ms);
+        require(!enabled.restart_required && enabled.captures.size() == 1 &&
+                    echo.calls == std::vector{'R', 'D', 'I'} && echo.submitted_delay == 10ms &&
+                    enabled.captures.front().timing.submitted_delay == 10ms,
+                "Echo mode updates APM delay through the production pipeline");
+
+        clock = 105ms;
+        feed(echo_pipeline.callbacks(), 1, 2, 480, 110ms);
+        const auto invalid = echo_pipeline.process(125ms);
+        require(invalid.restart_required && invalid.captures.empty(),
+                "A capture time ahead of the processing clock invalidates the run");
+        clock = 135ms;
+        feed(echo_pipeline.callbacks(), 1, 2, 480, 120ms);
+        require(echo_pipeline.process(135ms).restart_required &&
+                    echo.calls == std::vector{'R', 'D', 'I', 'R'},
+                "Invalid timing prevents reuse of the current processor run");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
