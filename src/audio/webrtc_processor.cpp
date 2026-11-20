@@ -37,7 +37,6 @@ public:
           input_config_(static_cast<int>(input.sample_rate), input.channels),
           reference_config_(static_cast<int>(reference.sample_rate), reference.channels),
           input_channels_(input.channels), reference_channels_(reference.channels),
-          output_(input.channels, std::vector<float>(input_config_.num_frames())),
           output_channels_(input.channels)
     {
         if (!processor_) {
@@ -49,9 +48,6 @@ public:
         streams.input_stream() = streams.output_stream() = input_config_;
         streams.reverse_input_stream() = streams.reverse_output_stream() = reference_config_;
         check(processor_->Initialize(streams), "Initialize WebRTC audio streams");
-        for (std::size_t channel = 0; channel < output_.size(); ++channel) {
-            output_channels_[channel] = output_[channel].data();
-        }
     }
 
     void analyze_reference(const AudioFrame& frame) override
@@ -67,9 +63,12 @@ public:
               "Set the WebRTC buffering delay");
     }
 
-    void process_capture(const AudioFrame& frame) override
+    void process_capture(AudioFrame& frame) override
     {
         channel_pointers(frame, input_config_, input_channels_);
+        for (std::size_t channel = 0; channel < output_channels_.size(); ++channel) {
+            output_channels_[channel] = frame.samples[channel].data();
+        }
         check(processor_->ProcessStream(input_channels_.data(), input_config_, input_config_,
                                         output_channels_.data()),
               "Submit WebRTC audio input");
@@ -81,7 +80,6 @@ private:
     webrtc::StreamConfig reference_config_;
     std::vector<const float*> input_channels_;
     std::vector<const float*> reference_channels_;
-    std::vector<std::vector<float>> output_;
     std::vector<float*> output_channels_;
 };
 

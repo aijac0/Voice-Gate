@@ -4,11 +4,16 @@
 
 namespace voice_gate::audio {
 
+struct ProcessedCapture {
+    AudioFrame frame;
+    FrameTiming timing;
+};
+
 struct ProcessingBatch {
     std::size_t reference_frames{};
     std::size_t input_silence_frames{};
     std::size_t reference_silence_frames{};
-    std::vector<FrameTiming> input_timings;
+    std::vector<ProcessedCapture> captures;
     bool restart_required{};
 };
 

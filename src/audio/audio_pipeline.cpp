@@ -89,13 +89,14 @@ ProcessingBatch AudioPipeline::process(AudioTime now)
         ++batch.reference_frames;
     }
     while (!pending_references_.empty()) {
-        const auto input = take_due_frame(input_, now);
+        auto input = take_due_frame(input_, now);
         if (!input) {
             break;
         }
-        batch.input_timings.push_back(handoff_.submit_input(*input, pending_references_.front()));
+        const auto timing = handoff_.submit_input(*input, pending_references_.front());
         pending_references_.pop_front();
         batch.input_silence_frames += input->silence_frames;
+        batch.captures.push_back({std::move(*input), timing});
     }
     return batch;
 }

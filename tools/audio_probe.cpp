@@ -219,15 +219,15 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
         }
         const auto batch = pipeline.process(backend.now());
         epoch.references += batch.reference_frames;
-        epoch.inputs += batch.input_timings.size();
+        epoch.inputs += batch.captures.size();
         epoch.input_silence += batch.input_silence_frames;
         epoch.reference_silence += batch.reference_silence_frames;
-        if (!batch.input_timings.empty()) {
+        if (!batch.captures.empty()) {
             last_input = now;
             if (!epoch.first) {
-                epoch.first = batch.input_timings.front();
+                epoch.first = batch.captures.front().timing;
             }
-            epoch.last = batch.input_timings.back();
+            epoch.last = batch.captures.back().timing;
         }
         if (batch.restart_required || now - last_input >= 500ms) {
             epoch.restart = batch.restart_required ? "audio-discontinuity" : "audio-stalled";

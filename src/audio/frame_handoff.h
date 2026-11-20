@@ -11,7 +11,8 @@ public:
     virtual ~AudioProcessor() = default;
     virtual void analyze_reference(const AudioFrame& frame) = 0;
     virtual void set_stream_delay(std::chrono::milliseconds delay) = 0;
-    virtual void process_capture(const AudioFrame& frame) = 0;
+    // Replace the samples in place, preserving the format and timing metadata.
+    virtual void process_capture(AudioFrame& frame) = 0;
 };
 
 struct FrameTiming {
@@ -34,8 +35,8 @@ public:
                  bool apply_delay);
 
     [[nodiscard]] ReferenceTiming submit_reference(const AudioFrame& reference);
-    [[nodiscard]] FrameTiming submit_input(const AudioFrame& input, ReferenceTiming reference);
-    [[nodiscard]] FrameTiming submit(const AudioFrame& reference, const AudioFrame& input);
+    [[nodiscard]] FrameTiming submit_input(AudioFrame& input, ReferenceTiming reference);
+    [[nodiscard]] FrameTiming submit(const AudioFrame& reference, AudioFrame& input);
 
 private:
     AudioProcessor& processor_;

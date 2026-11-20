@@ -25,7 +25,7 @@ ReferenceTiming FrameHandoff::submit_reference(const AudioFrame& reference)
     return {submission, reference.first_sample};
 }
 
-FrameTiming FrameHandoff::submit_input(const AudioFrame& input, ReferenceTiming reference)
+FrameTiming FrameHandoff::submit_input(AudioFrame& input, ReferenceTiming reference)
 {
     const auto input_submission = clock_();
     const FrameTiming timing{reference.submission, reference.scheduled_output,
@@ -41,7 +41,7 @@ FrameTiming FrameHandoff::submit_input(const AudioFrame& input, ReferenceTiming 
     return timing;
 }
 
-FrameTiming FrameHandoff::submit(const AudioFrame& reference, const AudioFrame& input)
+FrameTiming FrameHandoff::submit(const AudioFrame& reference, AudioFrame& input)
 {
     return submit_input(input, submit_reference(reference));
 }

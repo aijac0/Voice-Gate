@@ -16,7 +16,7 @@ public:
         calls.push_back('D');
         delay = value;
     }
-    void process_capture(const AudioFrame&) override { calls.push_back('I'); }
+    void process_capture(AudioFrame&) override { calls.push_back('I'); }
 
     std::vector<char> calls;
     std::chrono::milliseconds delay{};
@@ -29,7 +29,8 @@ bool check(AudioTime reference_submission, AudioTime input_time, AudioTime input
     const std::array times{reference_submission, input_submission};
     std::size_t next = 0;
     FrameHandoff handoff(recorder, [&] { return times.at(next++); }, effects);
-    const auto result = handoff.submit(AudioFrame{106ms, {}, 0}, AudioFrame{input_time, {}, 0});
+    AudioFrame input{input_time, {}, 0};
+    const auto result = handoff.submit(AudioFrame{106ms, {}, 0}, input);
     const auto expected_calls = effects ? std::vector{'R', 'D', 'I'} : std::vector{'R', 'I'};
     return result.reference_submission == reference_submission &&
            result.input_submission == input_submission &&
