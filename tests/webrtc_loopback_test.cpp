@@ -1,4 +1,5 @@
 #include "segment/segment_controller.h"
+#include "transport/gpt_live.h"
 #include "transport/webrtc_peer.h"
 
 #include <rtc/rtc.hpp>
@@ -20,8 +21,7 @@ using voice_gate::audio::AudioFrame;
 namespace {
 
 constexpr auto started_event = R"({"type":"session.started","session":{"id":"local-peer"}})";
-constexpr auto close_request = R"({"type":"session.close"})";
-constexpr auto closed_event = R"({"type":"session.closed","session":{"id":"local-peer"}})";
+constexpr auto closed_event = R"({"type":"session.closed","session":{"id":"local-peer"},"reason":"close_requested","usage":{"seconds":15}})";
 
 void require(bool condition, const char* message)
 {
@@ -138,13 +138,21 @@ void check_loopback()
     require(control->label() == "oai-events" && !client.send_capture(frame(0ms, false)),
             "Audio stays local until the controller opens the capture gate");
     control->send(started_event);
-    auto saw_event = [&](const std::string& expected) {
+    std::optional<LiveLifecycleEvent> event;
+    auto saw_event = [&](LiveLifecycleEvent::Type expected) {
         const auto events = client.take_events();
-        return std::find(events.control.begin(), events.control.end(), expected) != events.control.end();
+        for (const auto& message : events.control) {
+            event = parse_live_lifecycle(message);
+            if (event && event->type == expected) {
+                return true;
+            }
+        }
+        return false;
     };
-    wait_for([&] { return saw_event(started_event); }, "The started event must reach the native client");
+    wait_for([&] { return saw_event(LiveLifecycleEvent::Type::started); },
+             "The started event must reach the native client");
 
-    const auto buffered = controller.segment_started(id, "local-peer", Clock::now());
+    const auto buffered = controller.segment_started(id, event->session_id, Clock::now());
     require(buffered.size() == 3 && controller.phase() == Phase::active, "Ready flushes the roll in order");
     client.allow_capture(true);
     for (const auto& action : buffered) {
@@ -191,15 +199,16 @@ void check_loopback()
     require(close.size() == 1 && std::holds_alternative<RequestClose>(close.front()),
             "The segment controller emits closure on the control channel");
     client.allow_capture(false);
-    client.send_control(close_request);
+    client.send_control(std::string(close_live_session));
     require(!client.send_capture(frame(50ms, true)), "Closure stops capture on the old peer");
     wait_for([&] {
         std::lock_guard lock(state->mutex);
-        return state->messages == std::vector<std::string>{close_request};
+        return state->messages.size() == 1 && state->messages.front() == close_live_session;
     }, "The loopback peer did not receive the closure command");
     control->send(closed_event);
-    wait_for([&] { return saw_event(closed_event); }, "The closure confirmation did not return");
-    const auto release = controller.segment_closed(id, "local-peer", false, Clock::now());
+    wait_for([&] { return saw_event(LiveLifecycleEvent::Type::closed); }, "The closure confirmation did not return");
+    require(event->usage_seconds == 15.0, "The client must read final usage on the data channel");
+    const auto release = controller.segment_closed(id, event->session_id, false, Clock::now());
     require(release.size() == 1 && std::holds_alternative<ReleaseSegment>(release.front()),
             "The matching confirmation releases the segment");
     responder.close();

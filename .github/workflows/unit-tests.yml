@@ -70,9 +70,9 @@ jobs:
       - name: Configure native media
         run: |
           cmake -S . -B build-transport -DVOICE_GATE_ENABLE_WEBRTC_MEDIA=ON \
-            -DCMAKE_PREFIX_PATH="$PWD/build-native-webrtc/install/datachannel;$PWD/build-native-webrtc/install/opus"
+            -DCMAKE_PREFIX_PATH="$PWD/build-native-webrtc/install/datachannel;$PWD/build-native-webrtc/install/opus;$PWD/build-native-webrtc/install/json"
 
       - name: Build and test the local peer connection
         run: |
-          cmake --build build-transport --target voice_gate_webrtc_loopback_test --parallel
-          ctest --test-dir build-transport --output-on-failure --no-tests=error -R '^webrtc_loopback$'
+          cmake --build build-transport --target voice_gate_webrtc_loopback_test voice_gate_signaling_client_test --parallel
+          ctest --test-dir build-transport --output-on-failure --no-tests=error -R '^(webrtc_loopback|signaling_client)$'

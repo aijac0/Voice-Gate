@@ -50,4 +50,9 @@ cmake -S "$opus" -B "$work_dir/opus-build" \
     -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF
 cmake --build "$work_dir/opus-build" --parallel 4
 cmake --install "$work_dir/opus-build"
-printf 'CMake prefix path: %s/install/datachannel;%s/install/opus\n' "$work_dir" "$work_dir"
+
+cmake -S "$datachannel/deps/json" -B "$work_dir/json-build" \
+    -DCMAKE_INSTALL_PREFIX="$work_dir/install/json" -DJSON_BuildTests=OFF -DJSON_Install=ON
+cmake --install "$work_dir/json-build"
+printf 'CMake prefix path: %s/install/datachannel;%s/install/opus;%s/install/json\n' \
+    "$work_dir" "$work_dir" "$work_dir"

@@ -25,11 +25,14 @@ set_target_properties(voice_gate_segment PROPERTIES CXX_EXTENSIONS OFF)
 if(VOICE_GATE_ENABLE_WEBRTC_MEDIA)
     find_package(Threads REQUIRED)
     find_package(OpenSSL REQUIRED)
+    find_package(CURL REQUIRED)
     find_package(LibDataChannel 0.24.6 EXACT CONFIG REQUIRED)
     find_package(Opus 1.6.1 EXACT CONFIG REQUIRED)
-    add_library(voice_gate_webrtc_media src/transport/webrtc_peer.cpp)
+    find_package(nlohmann_json 3.12.0 EXACT CONFIG REQUIRED)
+    add_library(voice_gate_webrtc_media src/transport/gpt_live.cpp src/transport/webrtc_peer.cpp)
     target_link_libraries(voice_gate_webrtc_media PUBLIC voice_gate_audio
-                          PRIVATE LibDataChannel::LibDataChannel Opus::opus)
+                          PRIVATE LibDataChannel::LibDataChannel Opus::opus CURL::libcurl
+                                  nlohmann_json::nlohmann_json)
     set_target_properties(voice_gate_webrtc_media PROPERTIES CXX_EXTENSIONS OFF)
 endif()
 
@@ -82,11 +85,19 @@ if(BUILD_TESTING)
     add_test(NAME segment_controller COMMAND voice_gate_segment_test)
 
     if(VOICE_GATE_ENABLE_WEBRTC_MEDIA)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
         add_executable(voice_gate_webrtc_loopback_test tests/webrtc_loopback_test.cpp)
         target_link_libraries(voice_gate_webrtc_loopback_test PRIVATE voice_gate_webrtc_media
                               voice_gate_segment LibDataChannel::LibDataChannel)
         add_test(NAME webrtc_loopback COMMAND voice_gate_webrtc_loopback_test)
         set_tests_properties(webrtc_loopback PROPERTIES TIMEOUT 45)
+
+        add_executable(voice_gate_signaling_client_test tests/signaling_client_test.cpp)
+        target_link_libraries(voice_gate_signaling_client_test PRIVATE voice_gate_webrtc_media)
+        add_test(NAME signaling_client
+                 COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/server/run_client_test.py"
+                         $<TARGET_FILE:voice_gate_signaling_client_test>)
+        set_tests_properties(signaling_client PROPERTIES TIMEOUT 30)
     endif()
 
     if(VOICE_GATE_ENABLE_WEBRTC)
