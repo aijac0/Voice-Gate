@@ -3,6 +3,7 @@ project(VoiceGate LANGUAGES CXX)
 
 include(CTest)
 option(VOICE_GATE_ENABLE_WEBRTC "Build the WebRTC Audio Processing integration" OFF)
+option(VOICE_GATE_ENABLE_WEBRTC_MEDIA "Build the native WebRTC media transport" OFF)
 
 add_library(voice_gate_audio
     src/audio/audio_backend.cpp
@@ -20,6 +21,17 @@ set_target_properties(voice_gate_audio PROPERTIES CXX_EXTENSIONS OFF)
 add_library(voice_gate_segment src/segment/segment_controller.cpp)
 target_link_libraries(voice_gate_segment PUBLIC voice_gate_audio)
 set_target_properties(voice_gate_segment PROPERTIES CXX_EXTENSIONS OFF)
+
+if(VOICE_GATE_ENABLE_WEBRTC_MEDIA)
+    find_package(Threads REQUIRED)
+    find_package(OpenSSL REQUIRED)
+    find_package(LibDataChannel 0.24.6 EXACT CONFIG REQUIRED)
+    find_package(Opus 1.6.1 EXACT CONFIG REQUIRED)
+    add_library(voice_gate_webrtc_media src/transport/webrtc_peer.cpp)
+    target_link_libraries(voice_gate_webrtc_media PUBLIC voice_gate_audio
+                          PRIVATE LibDataChannel::LibDataChannel Opus::opus)
+    set_target_properties(voice_gate_webrtc_media PROPERTIES CXX_EXTENSIONS OFF)
+endif()
 
 if(VOICE_GATE_ENABLE_WEBRTC)
     find_package(PkgConfig REQUIRED)
@@ -68,6 +80,14 @@ if(BUILD_TESTING)
     add_executable(voice_gate_segment_test tests/segment_controller_test.cpp)
     target_link_libraries(voice_gate_segment_test PRIVATE voice_gate_segment)
     add_test(NAME segment_controller COMMAND voice_gate_segment_test)
+
+    if(VOICE_GATE_ENABLE_WEBRTC_MEDIA)
+        add_executable(voice_gate_webrtc_loopback_test tests/webrtc_loopback_test.cpp)
+        target_link_libraries(voice_gate_webrtc_loopback_test PRIVATE voice_gate_webrtc_media
+                              voice_gate_segment LibDataChannel::LibDataChannel)
+        add_test(NAME webrtc_loopback COMMAND voice_gate_webrtc_loopback_test)
+        set_tests_properties(webrtc_loopback PROPERTIES TIMEOUT 45)
+    endif()
 
     if(VOICE_GATE_ENABLE_WEBRTC)
         add_executable(voice_gate_webrtc_test tests/webrtc_processor_test.cpp)

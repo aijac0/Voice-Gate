@@ -46,3 +46,15 @@ The local signaling service exchanges WebRTC offers and answers using a server-s
 ```sh
 python3 -B -m unittest discover -s server -v
 ```
+
+## Test native WebRTC media
+
+Install OpenSSL development headers, then build the pinned libdatachannel and Opus dependencies. If OpenSSL is outside CMake’s search path, set `OPENSSL_ROOT_DIR` to its installation directory before running both CMake builds. The loopback test exchanges control events and encoded audio between two local peers.
+
+```sh
+./tools/build_webrtc_media.sh
+cmake -S . -B build-transport -DVOICE_GATE_ENABLE_WEBRTC_MEDIA=ON \
+  -DCMAKE_PREFIX_PATH="$PWD/build-native-webrtc/install/datachannel;$PWD/build-native-webrtc/install/opus"
+cmake --build build-transport
+ctest --test-dir build-transport --output-on-failure -R '^webrtc_loopback$'
+```
