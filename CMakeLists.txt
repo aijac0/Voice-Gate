@@ -6,6 +6,7 @@ option(VOICE_GATE_ENABLE_WEBRTC "Build the WebRTC Audio Processing integration" 
 
 add_library(voice_gate_audio
     src/audio/audio_backend.cpp
+    src/audio/audio_pipeline.cpp
     src/audio/audio_queue.cpp
     src/audio/frame_assembler.cpp
     src/audio/frame_handoff.cpp
@@ -38,6 +39,10 @@ if(BUILD_TESTING)
     add_executable(voice_gate_audio_queue_test tests/audio_queue_test.cpp)
     target_link_libraries(voice_gate_audio_queue_test PRIVATE voice_gate_audio)
     add_test(NAME audio_queue COMMAND voice_gate_audio_queue_test)
+
+    add_executable(voice_gate_audio_pipeline_test tests/audio_pipeline_test.cpp)
+    target_link_libraries(voice_gate_audio_pipeline_test PRIVATE voice_gate_audio)
+    add_test(NAME audio_pipeline COMMAND voice_gate_audio_pipeline_test)
 
     add_executable(voice_gate_frame_assembler_test tests/frame_assembler_test.cpp)
     target_link_libraries(voice_gate_frame_assembler_test PRIVATE voice_gate_audio)

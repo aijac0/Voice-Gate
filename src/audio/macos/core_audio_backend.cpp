@@ -2,10 +2,12 @@
 
 #include <CoreAudio/CoreAudio.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -76,7 +78,27 @@ SampleEncoding sample_encoding(const AudioStreamBasicDescription& stream)
 struct DeviceLayout {
     StreamFormat format{};
     std::vector<unsigned> buffer_channels;
+    bool operator==(const DeviceLayout&) const = default;
 };
+
+std::size_t max_frames(AudioDeviceID device)
+{
+    const auto range = read_property<AudioValueRange>(
+        device, {kAudioDevicePropertyBufferFrameSizeRange, kAudioObjectPropertyScopeGlobal,
+                 kAudioObjectPropertyElementMain},
+        "Read Core Audio buffer frame-size range");
+    if (!std::isfinite(range.mMaximum) || range.mMaximum < 1 ||
+        range.mMaximum > std::numeric_limits<UInt32>::max()) {
+        throw std::runtime_error("Invalid Core Audio buffer frame-size range");
+    }
+    const Property variable_size{kAudioDevicePropertyUsesVariableBufferFrameSizes,
+                                 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    const auto variable_max = AudioObjectHasProperty(device, &variable_size)
+        ? read_property<UInt32>(device, variable_size, "Read Core Audio variable frame limit")
+        : 0;
+    return std::max(static_cast<std::size_t>(std::ceil(range.mMaximum)),
+                    static_cast<std::size_t>(variable_max));
+}
 
 DeviceLayout read_layout(AudioDeviceID device, AudioObjectPropertyScope scope)
 {
@@ -248,8 +270,11 @@ DeviceFormats CoreAudioBackend::open()
     if (input != output) {
         state.registrations[1] = {&state, output, false, true};
     }
+    const auto input_max_frames = max_frames(input);
+    const auto output_max_frames = input == output ? input_max_frames : max_frames(output);
     state.opened = true;
-    return {state.input_layout.format, state.output_layout.format};
+    return {state.input_layout.format, state.output_layout.format,
+            input_max_frames, output_max_frames};
 }
 
 void CoreAudioBackend::start(DeviceCallbacks callbacks)
@@ -315,6 +340,19 @@ void CoreAudioBackend::stop()
 AudioTime CoreAudioBackend::now() const noexcept
 {
     return host_time(AudioGetCurrentHostTime());
+}
+
+bool CoreAudioBackend::configuration_changed() const
+{
+    const auto& state = *state_;
+    const auto input = default_device(kAudioHardwarePropertyDefaultInputDevice);
+    const auto output = default_device(kAudioHardwarePropertyDefaultOutputDevice);
+    const auto opened_output = state.registrations[0].output
+        ? state.registrations[0].device
+        : state.registrations[1].device;
+    return input != state.registrations[0].device || output != opened_output ||
+           read_layout(input, kAudioObjectPropertyScopeInput) != state.input_layout ||
+           read_layout(output, kAudioObjectPropertyScopeOutput) != state.output_layout;
 }
 
 }  // namespace voice_gate::audio

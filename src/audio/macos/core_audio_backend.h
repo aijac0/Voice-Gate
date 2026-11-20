@@ -15,6 +15,7 @@ public:
     void start(DeviceCallbacks callbacks) override;
     void stop() override;
     [[nodiscard]] AudioTime now() const noexcept override;
+    [[nodiscard]] bool configuration_changed() const;
 
 private:
     struct State;

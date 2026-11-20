@@ -18,12 +18,17 @@ FrameHandoff::FrameHandoff(AudioProcessor& processor, std::function<AudioTime()>
 {
 }
 
-FrameTiming FrameHandoff::submit(const AudioFrame& reference, const AudioFrame& input)
+ReferenceTiming FrameHandoff::submit_reference(const AudioFrame& reference)
 {
-    const auto reference_submission = clock_();
+    const auto submission = clock_();
     processor_.analyze_reference(reference);
+    return {submission, reference.first_sample};
+}
+
+FrameTiming FrameHandoff::submit_input(const AudioFrame& input, ReferenceTiming reference)
+{
     const auto input_submission = clock_();
-    const FrameTiming timing{reference_submission, reference.first_sample,
+    const FrameTiming timing{reference.submission, reference.scheduled_output,
                              input.first_sample, input_submission};
     if (apply_delay_) {
         const auto delay = std::chrono::round<std::chrono::milliseconds>(timing.buffering_delay());
@@ -34,6 +39,11 @@ FrameTiming FrameHandoff::submit(const AudioFrame& reference, const AudioFrame& 
     }
     processor_.process_capture(input);
     return timing;
+}
+
+FrameTiming FrameHandoff::submit(const AudioFrame& reference, const AudioFrame& input)
+{
+    return submit_input(input, submit_reference(reference));
 }
 
 }  // namespace voice_gate::audio

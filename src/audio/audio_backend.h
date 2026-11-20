@@ -17,11 +17,14 @@ struct StreamFormat {
     SampleEncoding encoding;
 
     [[nodiscard]] std::size_t bytes_per_sample() const noexcept;
+    bool operator==(const StreamFormat&) const = default;
 };
 
 struct DeviceFormats {
     StreamFormat input;
     StreamFormat output;
+    std::size_t max_input_frames;
+    std::size_t max_output_frames;
 };
 
 // Each buffer contains interleaved samples for its channels. A planar

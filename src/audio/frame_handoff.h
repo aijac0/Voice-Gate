@@ -23,11 +23,18 @@ struct FrameTiming {
     [[nodiscard]] AudioTime buffering_delay() const noexcept;
 };
 
+struct ReferenceTiming {
+    AudioTime submission;
+    AudioTime scheduled_output;
+};
+
 class FrameHandoff {
 public:
     FrameHandoff(AudioProcessor& processor, std::function<AudioTime()> clock,
                  bool apply_delay);
 
+    [[nodiscard]] ReferenceTiming submit_reference(const AudioFrame& reference);
+    [[nodiscard]] FrameTiming submit_input(const AudioFrame& input, ReferenceTiming reference);
     [[nodiscard]] FrameTiming submit(const AudioFrame& reference, const AudioFrame& input);
 
 private:
