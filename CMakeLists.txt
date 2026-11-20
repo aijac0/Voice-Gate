@@ -35,6 +35,10 @@ if(VOICE_GATE_ENABLE_WEBRTC_MEDIA)
                           PRIVATE LibDataChannel::LibDataChannel Opus::opus CURL::libcurl
                                   nlohmann_json::nlohmann_json)
     set_target_properties(voice_gate_webrtc_media PROPERTIES CXX_EXTENSIONS OFF)
+
+    add_executable(voice_gate_live_probe tools/live_probe.cpp)
+    target_link_libraries(voice_gate_live_probe PRIVATE voice_gate_webrtc_media)
+    set_target_properties(voice_gate_live_probe PROPERTIES CXX_EXTENSIONS OFF)
 endif()
 
 if(VOICE_GATE_ENABLE_WEBRTC)
@@ -101,8 +105,9 @@ if(BUILD_TESTING)
         target_link_libraries(voice_gate_signaling_client_test PRIVATE voice_gate_webrtc_media)
         add_test(NAME signaling_client
                  COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/server/run_client_test.py"
-                         $<TARGET_FILE:voice_gate_signaling_client_test>)
-        set_tests_properties(signaling_client PROPERTIES TIMEOUT 30)
+                         $<TARGET_FILE:voice_gate_signaling_client_test> $<TARGET_FILE:voice_gate_live_probe>
+                         $<TARGET_FILE:voice_gate_webrtc_loopback_test>)
+        set_tests_properties(signaling_client PROPERTIES TIMEOUT 45)
     endif()
 
     if(VOICE_GATE_ENABLE_WEBRTC)

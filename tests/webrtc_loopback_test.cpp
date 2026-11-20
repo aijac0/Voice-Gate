@@ -5,6 +5,7 @@
 #include <rtc/rtc.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <iostream>
 #include <mutex>
@@ -64,28 +65,10 @@ struct ResponderState {
     std::vector<ReceivedPacket> packets;
 };
 
-void check_loopback()
+std::shared_ptr<rtc::Track> configure_responder(rtc::PeerConnection& responder,
+                                                const std::shared_ptr<ResponderState>& state)
 {
-    SegmentController controller({48000, 1}, {
-        .trigger = {0.1, 20ms}, .opening_timeout = 20s, .finalization_timeout = 10s,
-        .buffered_audio_limit = 2s, .minimum_lifetime = 0ms, .grace_period = 0ms,
-    });
-    require(controller.capture(frame(0ms, false), Clock::now()).empty() &&
-                controller.capture(frame(10ms, true), Clock::now()).empty(),
-            "Quiet input and unconfirmed sound stay in the local pre-buffer");
-    const auto actions = controller.capture(frame(20ms, true), Clock::now());
-    require(actions.size() == 1 && std::holds_alternative<OpenSegment>(actions.front()),
-            "A confirmed onset starts the test peer's opening");
-    const auto id = std::get<OpenSegment>(actions.front()).id;
-
-    WebRtcPeer client({48000, 1}, {.ice_servers = {}, .bind_address = "127.0.0.1"});
-    auto state = std::make_shared<ResponderState>();
     const std::weak_ptr<ResponderState> destination = state;
-    rtc::Configuration options;
-    options.bindAddress = "127.0.0.1";
-    options.disableAutoNegotiation = true;
-    rtc::PeerConnection responder(options);
-
     constexpr std::uint32_t ssrc = 5196317;
     constexpr std::uint8_t payload_type = 111;
     rtc::Description::Audio description("audio", rtc::Description::Direction::SendRecv);
@@ -116,17 +99,96 @@ void check_loopback()
             target->channel = std::move(channel);
         }
     });
+    return track;
+}
+
+rtc::Configuration local_options()
+{
+    rtc::Configuration options;
+    options.bindAddress = "127.0.0.1";
+    options.disableAutoNegotiation = true;
+    return options;
+}
+
+std::string answer_offer(rtc::PeerConnection& responder, const std::string& offer)
+{
+    responder.setRemoteDescription(rtc::Description(offer, rtc::Description::Type::Offer));
+    responder.setLocalDescription(rtc::Description::Type::Answer);
+    wait_for([&] { return responder.gatheringState() == rtc::PeerConnection::GatheringState::Complete; },
+             "Loopback answer gathering timed out");
+    const auto description = responder.localDescription();
+    require(description.has_value(), "Expected a gathered local answer");
+    return description->generateSdp();
+}
+
+bool received_close(const std::shared_ptr<ResponderState>& state)
+{
+    std::lock_guard lock(state->mutex);
+    return state->messages.size() == 1 && state->messages.front() == close_live_session;
+}
+
+void respond_on_stdio()
+{
+    std::string length;
+    require(static_cast<bool>(std::getline(std::cin, length)), "Expected a framed SDP offer");
+    std::size_t size = 0;
+    const auto size_end = length.data() + length.size();
+    const auto parsed = std::from_chars(length.data(), size_end, size);
+    require(parsed.ec == std::errc{} && parsed.ptr == size_end && size > 0 && size <= 64 * 1024,
+            "Invalid SDP offer length");
+    std::string offer(size, '\0');
+    require(static_cast<bool>(std::cin.read(offer.data(), static_cast<std::streamsize>(size))),
+            "Expected the complete SDP offer");
+    auto state = std::make_shared<ResponderState>();
+    rtc::PeerConnection responder(local_options());
+    const auto track = configure_responder(responder, state);
+    const auto answer = answer_offer(responder, offer);
+    std::cout << answer.size() << '\n' << answer << std::flush;
+
+    std::shared_ptr<rtc::DataChannel> control;
+    wait_for([&] {
+        std::lock_guard lock(state->mutex);
+        control = state->channel;
+        return control && control->isOpen() && track->isOpen();
+    }, "The native live probe did not connect to the fixture peer");
+    control->send(started_event);
+    wait_for([&] { return received_close(state); }, "The probe did not request closure");
+    {
+        std::lock_guard lock(state->mutex);
+        require(state->packets.empty(), "The opening probe must leave microphone capture disabled");
+    }
+    control->send(closed_event);
+    // The test runner acknowledges the probe's successful exit. Keep the peer
+    // alive until then so teardown cannot race delivery of the final event.
+    require(std::cin.get() == '\n', "Expected the test runner's completion signal");
+    responder.close();
+}
+
+void check_loopback()
+{
+    SegmentController controller({48000, 1}, {
+        .trigger = {0.1, 20ms}, .opening_timeout = 20s, .finalization_timeout = 10s,
+        .buffered_audio_limit = 2s, .minimum_lifetime = 0ms, .grace_period = 0ms,
+    });
+    require(controller.capture(frame(0ms, false), Clock::now()).empty() &&
+                controller.capture(frame(10ms, true), Clock::now()).empty(),
+            "Quiet input and unconfirmed sound stay in the local pre-buffer");
+    const auto actions = controller.capture(frame(20ms, true), Clock::now());
+    require(actions.size() == 1 && std::holds_alternative<OpenSegment>(actions.front()),
+            "A confirmed onset starts the test peer's opening");
+    const auto id = std::get<OpenSegment>(actions.front()).id;
+
+    WebRtcPeer client({48000, 1}, {.ice_servers = {}, .bind_address = "127.0.0.1"});
+    auto state = std::make_shared<ResponderState>();
+    rtc::PeerConnection responder(local_options());
+    auto track = configure_responder(responder, state);
 
     std::optional<std::string> offer;
     wait_for([&] { return (offer = client.offer()).has_value(); }, "Native offer gathering timed out");
     require(offer->find("a=fingerprint:") != std::string::npos &&
                 offer->find("a=candidate:") != std::string::npos,
             "The offer must contain the DTLS fingerprint and gathered ICE candidates");
-    responder.setRemoteDescription(rtc::Description(*offer, rtc::Description::Type::Offer));
-    responder.setLocalDescription(rtc::Description::Type::Answer);
-    wait_for([&] { return responder.gatheringState() == rtc::PeerConnection::GatheringState::Complete; },
-             "Loopback answer gathering timed out");
-    client.apply_answer(responder.localDescription()->generateSdp());
+    client.apply_answer(answer_offer(responder, *offer));
     require(controller.opening_response(id, "local-peer", Clock::now()).empty(),
             "Signaling alone must keep buffered microphone audio local");
     std::shared_ptr<rtc::DataChannel> control;
@@ -201,10 +263,7 @@ void check_loopback()
     client.allow_capture(false);
     client.send_control(std::string(close_live_session));
     require(!client.send_capture(frame(50ms, true)), "Closure stops capture on the old peer");
-    wait_for([&] {
-        std::lock_guard lock(state->mutex);
-        return state->messages.size() == 1 && state->messages.front() == close_live_session;
-    }, "The loopback peer did not receive the closure command");
+    wait_for([&] { return received_close(state); }, "The loopback peer did not receive the closure command");
     control->send(closed_event);
     wait_for([&] { return saw_event(LiveLifecycleEvent::Type::closed); }, "The closure confirmation did not return");
     require(event->usage_seconds == 15.0, "The client must read final usage on the data channel");
@@ -219,10 +278,14 @@ void check_loopback()
 
 }  // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
-        check_loopback();
+        if (argc == 2 && std::string_view(argv[1]) == "--answer-stdio") {
+            respond_on_stdio();
+        } else {
+            check_loopback();
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
