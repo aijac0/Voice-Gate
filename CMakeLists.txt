@@ -10,18 +10,22 @@ add_library(voice_gate_audio
     src/audio/audio_queue.cpp
     src/audio/frame_assembler.cpp
     src/audio/frame_handoff.cpp
+    src/audio/local_activation.cpp
     src/audio/pcm.cpp
 )
 target_include_directories(voice_gate_audio PUBLIC src)
 target_compile_features(voice_gate_audio PUBLIC cxx_std_20)
 set_target_properties(voice_gate_audio PROPERTIES CXX_EXTENSIONS OFF)
 
+add_library(voice_gate_segment src/segment/segment_controller.cpp)
+target_link_libraries(voice_gate_segment PUBLIC voice_gate_audio)
+set_target_properties(voice_gate_segment PROPERTIES CXX_EXTENSIONS OFF)
+
 if(VOICE_GATE_ENABLE_WEBRTC)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(WEBRTC_APM REQUIRED IMPORTED_TARGET webrtc-audio-processing-2=2.1)
-    pkg_get_variable(WEBRTC_APM_INCLUDE_ROOT webrtc-audio-processing-2 includedir)
     target_sources(voice_gate_audio PRIVATE src/audio/webrtc_processor.cpp)
-    target_include_directories(voice_gate_audio SYSTEM PRIVATE "${WEBRTC_APM_INCLUDE_ROOT}")
+    target_include_directories(voice_gate_audio SYSTEM PRIVATE "${WEBRTC_APM_INCLUDEDIR}")
     target_link_libraries(voice_gate_audio PRIVATE PkgConfig::WEBRTC_APM)
 endif()
 
@@ -56,6 +60,14 @@ if(BUILD_TESTING)
     add_executable(voice_gate_frame_handoff_test tests/frame_handoff_test.cpp)
     target_link_libraries(voice_gate_frame_handoff_test PRIVATE voice_gate_audio)
     add_test(NAME frame_handoff COMMAND voice_gate_frame_handoff_test)
+
+    add_executable(voice_gate_local_activation_test tests/local_activation_test.cpp)
+    target_link_libraries(voice_gate_local_activation_test PRIVATE voice_gate_audio)
+    add_test(NAME local_activation COMMAND voice_gate_local_activation_test)
+
+    add_executable(voice_gate_segment_test tests/segment_controller_test.cpp)
+    target_link_libraries(voice_gate_segment_test PRIVATE voice_gate_segment)
+    add_test(NAME segment_controller COMMAND voice_gate_segment_test)
 
     if(VOICE_GATE_ENABLE_WEBRTC)
         add_executable(voice_gate_webrtc_test tests/webrtc_processor_test.cpp)

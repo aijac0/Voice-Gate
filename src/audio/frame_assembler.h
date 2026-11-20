@@ -6,6 +6,8 @@
 
 namespace voice_gate::audio {
 
+inline constexpr std::chrono::milliseconds frame_duration{10};
+
 struct FrameFormat {
     unsigned sample_rate;
     unsigned channels;
