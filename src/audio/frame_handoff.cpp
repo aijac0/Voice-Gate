@@ -1,6 +1,5 @@
 #include "audio/frame_handoff.h"
 
-#include <stdexcept>
 #include <utility>
 
 namespace voice_gate::audio {
@@ -12,9 +11,9 @@ AudioTime FrameTiming::buffering_delay() const noexcept
     return output_wait + input_wait;
 }
 
-FrameHandoff::FrameHandoff(AudioProcessor& processor, std::function<AudioTime()> clock,
-                           bool apply_delay)
-    : processor_(processor), clock_(std::move(clock)), apply_delay_(apply_delay)
+FrameHandoff::FrameHandoff(AudioProcessor& processor, std::function<AudioTime()> clock)
+    : processor_(processor), clock_(std::move(clock)),
+      apply_delay_(processor.echo_cancellation_enabled())
 {
 }
 
@@ -25,23 +24,25 @@ ReferenceTiming FrameHandoff::submit_reference(const AudioFrame& reference)
     return {submission, reference.first_sample};
 }
 
-FrameTiming FrameHandoff::submit_input(const AudioFrame& input, ReferenceTiming reference)
+std::optional<FrameTiming> FrameHandoff::submit_input(AudioFrame& input, ReferenceTiming reference)
 {
     const auto input_submission = clock_();
-    const FrameTiming timing{reference.submission, reference.scheduled_output,
-                             input.first_sample, input_submission};
+    FrameTiming timing{reference.submission, reference.scheduled_output,
+                       input.first_sample, input_submission, std::nullopt};
     if (apply_delay_) {
-        const auto delay = std::chrono::round<std::chrono::milliseconds>(timing.buffering_delay());
-        if (delay < std::chrono::milliseconds::zero() || delay > std::chrono::milliseconds(500)) {
-            throw std::runtime_error("Buffering delay is outside the WebRTC range");
+        const auto delay = timing.buffering_delay();
+        if (input_submission < input.first_sample || input_submission < reference.submission ||
+            delay < AudioTime::zero() || delay > std::chrono::milliseconds(500)) {
+            return std::nullopt;
         }
-        processor_.set_stream_delay(delay);
+        timing.submitted_delay = std::chrono::round<std::chrono::milliseconds>(delay);
+        processor_.set_stream_delay(*timing.submitted_delay);
     }
     processor_.process_capture(input);
     return timing;
 }
 
-FrameTiming FrameHandoff::submit(const AudioFrame& reference, const AudioFrame& input)
+std::optional<FrameTiming> FrameHandoff::submit(const AudioFrame& reference, AudioFrame& input)
 {
     return submit_input(input, submit_reference(reference));
 }

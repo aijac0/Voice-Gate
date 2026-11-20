@@ -38,7 +38,7 @@ AudioPipeline::AudioPipeline(DeviceFormats devices, FrameFormat input, FrameForm
                              std::function<AudioTime()> clock, std::uint64_t generation)
     : input_queue_(devices.input, devices.max_input_frames, max_device_blocks, generation),
       reference_queue_(devices.output, devices.max_output_frames, max_device_blocks, generation),
-      input_(input), reference_(reference), handoff_(processor, std::move(clock), false),
+      input_(input), reference_(reference), handoff_(processor, std::move(clock)),
       source_(source)
 {
 }
@@ -73,14 +73,16 @@ void AudioPipeline::render(void* context, const OutputBlock& block) noexcept
 ProcessingBatch AudioPipeline::process(AudioTime now)
 {
     ProcessingBatch batch;
-    if (queue_overflow_.load(std::memory_order_acquire) ||
+    if (restart_required_ || queue_overflow_.load(std::memory_order_acquire) ||
         !ingest_blocks(reference_queue_, reference_) ||
         !ingest_blocks(input_queue_, input_)) {
+        restart_required_ = true;
         batch.restart_required = true;
         return batch;
     }
     while (auto reference = take_due_frame(reference_, now)) {
         if (pending_references_.size() == max_pending_reference_frames) {
+            restart_required_ = true;
             batch.restart_required = true;
             return batch;
         }
@@ -89,13 +91,19 @@ ProcessingBatch AudioPipeline::process(AudioTime now)
         ++batch.reference_frames;
     }
     while (!pending_references_.empty()) {
-        const auto input = take_due_frame(input_, now);
+        auto input = take_due_frame(input_, now);
         if (!input) {
             break;
         }
-        batch.input_timings.push_back(handoff_.submit_input(*input, pending_references_.front()));
+        const auto timing = handoff_.submit_input(*input, pending_references_.front());
+        if (!timing) {
+            restart_required_ = true;
+            batch.restart_required = true;
+            return batch;
+        }
         pending_references_.pop_front();
         batch.input_silence_frames += input->silence_frames;
+        batch.captures.push_back({std::move(*input), *timing});
     }
     return batch;
 }
