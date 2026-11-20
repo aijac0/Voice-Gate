@@ -11,11 +11,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <numbers>
+#include <numeric>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -88,7 +91,12 @@ std::vector<std::byte> make_tone(const StreamFormat& format)
 
 struct Probe {
     Probe(CoreAudioBackend& backend, DeviceFormats formats)
-        : backend(backend), formats(formats), tone(make_tone(formats.output)),
+        : Probe(backend, formats, make_tone(formats.output))
+    {
+    }
+
+    Probe(CoreAudioBackend& backend, DeviceFormats formats, std::vector<std::byte> playback)
+        : backend(backend), formats(formats), playback(std::move(playback)),
           captured(static_cast<std::size_t>(2 * formats.input.sample_rate) *
                    formats.input.bytes_per_sample())
     {
@@ -114,18 +122,18 @@ struct Probe {
         const auto first_frame = probe.output.total_frames;
         probe.output.observe(block.first_sample, probe.backend.now(), block.frames);
         const auto stride = probe.formats.output.bytes_per_sample();
-        const auto tone_frames = probe.tone.size() / stride;
+        const auto playback_frames = probe.playback.size() / stride;
         for (const auto& buffer : block.buffers) {
             for (std::size_t frame = 0; frame < block.frames; ++frame) {
-                const auto tone_frame = first_frame + frame;
+                const auto playback_frame = first_frame + frame;
                 auto* destination = buffer.bytes.data() + frame * buffer.channels * stride;
-                if (tone_frame >= tone_frames) {
+                if (playback_frame >= playback_frames) {
                     std::memset(destination, 0, buffer.channels * stride);
                     continue;
                 }
                 for (unsigned channel = 0; channel < buffer.channels; ++channel) {
                     std::memcpy(destination + channel * stride,
-                                probe.tone.data() + tone_frame * stride, stride);
+                                probe.playback.data() + playback_frame * stride, stride);
                 }
             }
         }
@@ -144,7 +152,7 @@ struct Probe {
 
     CoreAudioBackend& backend;
     DeviceFormats formats;
-    std::vector<std::byte> tone;
+    std::vector<std::byte> playback;
     std::vector<std::byte> captured;
     std::size_t captured_bytes{};
     Timing input;
@@ -152,6 +160,86 @@ struct Probe {
 };
 
 #ifdef VOICE_GATE_ENABLE_WEBRTC
+std::vector<std::byte> make_echo_fixture(const StreamFormat& format)
+{
+    const auto frames = static_cast<std::size_t>(5 * format.sample_rate);
+    const auto stride = format.bytes_per_sample();
+    std::vector<std::byte> playback(frames * stride);
+    std::uint32_t seed = 0xbd14a869;
+    float smoothed = 0.0F;
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        const double seconds = frame / format.sample_rate;
+        float sample = 0.0F;
+        if (seconds >= 0.5 && seconds < 4.5) {
+            seed = seed * 1664525u + 1013904223u;
+            const float white = static_cast<float>(seed >> 16) / 32768.0F - 1.0F;
+            smoothed = 0.8F * smoothed + 0.2F * white;
+            const auto ramp = std::min({1.0, (seconds - 0.5) / 0.05, (4.5 - seconds) / 0.05});
+            sample = static_cast<float>(0.16 * ramp) * smoothed;
+        }
+        write_sample(playback.data() + frame * stride, format.encoding, sample);
+    }
+    return playback;
+}
+
+struct Energy {
+    void add(const AudioFrame& frame)
+    {
+        for (const auto& channel : frame.samples) {
+            sum = std::inner_product(channel.begin(), channel.end(), channel.begin(), sum);
+            samples += channel.size();
+        }
+    }
+
+    [[nodiscard]] double mean() const { return samples > 0 ? sum / samples : 0.0; }
+
+    double sum{};
+    std::size_t samples{};
+};
+
+struct EchoLevels {
+    [[nodiscard]] double reduction_db() const { return 10.0 * std::log10(raw.mean() / clean.mean()); }
+
+    Energy quiet;
+    Energy raw;
+    Energy clean;
+    std::size_t measured_frames{};
+};
+
+class EchoProbe final : public AudioProcessor {
+public:
+    explicit EchoProbe(AudioProcessor& processor) : processor_(processor) {}
+
+    bool echo_cancellation_enabled() const noexcept override { return true; }
+    void analyze_reference(const AudioFrame& frame) override { processor_.analyze_reference(frame); }
+    void set_stream_delay(std::chrono::milliseconds delay) override { processor_.set_stream_delay(delay); }
+
+    void process_capture(AudioFrame& frame) override
+    {
+        first_capture_ = first_capture_.value_or(frame.first_sample);
+        const auto elapsed = frame.first_sample - *first_capture_;
+        const bool usable = frame.silence_frames == 0;
+        const bool settled = usable && elapsed >= 2s && elapsed < 4s;
+        if (usable && elapsed >= 100ms && elapsed < 350ms) {
+            levels.quiet.add(frame);
+        }
+        if (settled) {
+            levels.raw.add(frame);
+            ++levels.measured_frames;
+        }
+        processor_.process_capture(frame);
+        if (settled) {
+            levels.clean.add(frame);
+        }
+    }
+
+    EchoLevels levels;
+
+private:
+    AudioProcessor& processor_;
+    std::optional<AudioTime> first_capture_;
+};
+
 class DeviceStop {
 public:
     explicit DeviceStop(CoreAudioBackend& backend) : backend_(backend) {}
@@ -178,6 +266,8 @@ struct Epoch {
     std::optional<FrameTiming> last;
     std::string_view restart;
     float input_peak{};
+    EchoLevels echo;
+    std::optional<std::chrono::milliseconds> apm_delay;
 };
 
 void print_timing(const char* point, std::size_t sequence, const FrameTiming& timing)
@@ -187,17 +277,25 @@ void print_timing(const char* point, std::size_t sequence, const FrameTiming& ti
               << " scheduled_output_ns=" << timing.scheduled_output.count()
               << " capture_time_ns=" << timing.capture_time.count()
               << " input_submission_ns=" << timing.input_submission.count()
-              << " buffering_delay_ns=" << timing.buffering_delay().count() << '\n';
+              << " buffering_delay_ns=" << timing.buffering_delay().count();
+    if (timing.submitted_delay) {
+        std::cout << " submitted_delay_ms=" << timing.submitted_delay->count();
+    }
+    std::cout << '\n';
 }
 
 Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat input,
                 FrameFormat reference, std::uint64_t generation,
-                std::chrono::steady_clock::time_point deadline)
+                std::chrono::steady_clock::time_point deadline, EchoCancellation echo)
 {
-    Probe fixture(backend, devices);
-    const auto processor = make_webrtc_processor(input, reference);
+    const bool echo_enabled = echo == EchoCancellation::enabled;
+    Probe fixture(backend, devices, echo_enabled ? make_echo_fixture(devices.output)
+                                                  : make_tone(devices.output));
+    const auto processor = make_webrtc_processor(input, reference, echo);
+    EchoProbe echo_probe(*processor);
+    AudioProcessor& capture_processor = echo_enabled ? echo_probe : *processor;
     AudioPipeline pipeline(devices, input, reference, {&fixture, Probe::capture, Probe::render},
-                           *processor, [&] { return backend.now(); }, generation);
+                           capture_processor, [&] { return backend.now(); }, generation);
     DeviceStop stop_on_exit(backend);
     backend.start(pipeline.callbacks());
 
@@ -217,6 +315,7 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
             }
             next_check = now + 100ms;
         }
+        const auto previous_measurements = echo_probe.levels.measured_frames;
         const auto batch = pipeline.process(backend.now());
         epoch.references += batch.reference_frames;
         epoch.inputs += batch.captures.size();
@@ -228,6 +327,13 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
                 epoch.first = batch.captures.front().timing;
             }
             epoch.last = batch.captures.back().timing;
+            if (echo_enabled) {
+                // Drain APM's one-entry statistics queue while processing is active.
+                const auto delay = processor->estimated_echo_delay();
+                if (echo_probe.levels.measured_frames > previous_measurements) {
+                    epoch.apm_delay = delay;
+                }
+            }
         }
         if (batch.restart_required || now - last_input >= 500ms) {
             epoch.restart = batch.restart_required ? "audio-discontinuity" : "audio-stalled";
@@ -240,6 +346,7 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
     }
     backend.stop();
     epoch.input_peak = fixture.input_peak();
+    epoch.echo = echo_probe.levels;
 
     std::cout << "generation=" << generation
               << " output_device=" << backend.output_device_id()
@@ -259,6 +366,17 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
     if (epoch.first) {
         print_timing("first", 1, *epoch.first);
         print_timing("last", epoch.inputs, *epoch.last);
+    }
+    if (epoch.echo.measured_frames > 0) {
+        std::cout << "echo_frames=" << epoch.echo.measured_frames
+                  << " quiet_rms=" << std::sqrt(epoch.echo.quiet.mean())
+                  << " raw_rms=" << std::sqrt(epoch.echo.raw.mean())
+                  << " clean_rms=" << std::sqrt(epoch.echo.clean.mean())
+                  << " attenuation_db=" << epoch.echo.reduction_db();
+        if (epoch.apm_delay) {
+            std::cout << " apm_delay_ms=" << epoch.apm_delay->count();
+        }
+        std::cout << '\n';
     }
     return epoch;
 }
@@ -281,7 +399,7 @@ DeviceFormats wait_for_devices(CoreAudioBackend& backend, CoreAudioOutput output
 
 enum class TestTransition { none, restart, switch_output };
 
-int verify_webrtc(TestTransition transition, CoreAudioInput input_route)
+int verify_webrtc(TestTransition transition, CoreAudioInput input_route, EchoCancellation echo)
 {
     CoreAudioBackend backend;
     auto devices = backend.open(CoreAudioOutput::default_device, input_route);
@@ -290,13 +408,15 @@ int verify_webrtc(TestTransition transition, CoreAudioInput input_route)
     const FrameFormat reference{48000, devices.output.channels};
     const unsigned phases = transition == TestTransition::none ? 1 : 2;
     std::uint64_t generation = 0;
+    const bool echo_enabled = echo == EchoCancellation::enabled;
     for (unsigned phase = 0; phase < phases; ++phase) {
-        const auto deadline = std::chrono::steady_clock::now() + 1400ms;
+        const auto deadline = std::chrono::steady_clock::now() + (echo_enabled ? 5500ms : 1400ms);
         const auto output = phase == 1 && transition == TestTransition::switch_output
             ? CoreAudioOutput::system_device : CoreAudioOutput::default_device;
         std::size_t frames_processed = 0;
         bool recovered = false;
         bool captured_signal = false;
+        Epoch epoch;
         do {
             if (++generation > 8) {
                 throw std::runtime_error("Repeated audio interruption prevented verification");
@@ -308,13 +428,24 @@ int verify_webrtc(TestTransition transition, CoreAudioInput input_route)
                 backend.output_device_id() == initial_output) {
                 throw std::runtime_error("The default and system output are the same device");
             }
-            const auto epoch = run_epoch(backend, devices, input, reference, generation, deadline);
+            epoch = run_epoch(backend, devices, input, reference, generation, deadline, echo);
             frames_processed += epoch.inputs;
             captured_signal = captured_signal || epoch.input_peak > 0;
             recovered = epoch.restart.empty();
         } while (!recovered && std::chrono::steady_clock::now() < deadline);
         if (!recovered || frames_processed < 10 || !captured_signal) {
             throw std::runtime_error("WebRTC did not receive a sustained run of complete frames");
+        }
+        if (echo_enabled) {
+            if (epoch.echo.measured_frames < 100 || epoch.echo.quiet.samples == 0 || !epoch.apm_delay) {
+                throw std::runtime_error("Too little settled playback to measure echo cancellation");
+            }
+            if (epoch.echo.raw.mean() <= 2.0 * epoch.echo.quiet.mean()) {
+                throw std::runtime_error("Playback did not raise microphone power above the quiet baseline");
+            }
+            if (epoch.echo.reduction_db() < 6.0) {
+                throw std::runtime_error("Echo cancellation reduced capture power by less than 6 dB");
+            }
         }
         if (phase + 1 < phases) {
             std::cout << (transition == TestTransition::switch_output
@@ -333,7 +464,8 @@ int main(int argc, [[maybe_unused]] char** argv)
     try {
         if (argc > 1) {
 #ifdef VOICE_GATE_ENABLE_WEBRTC
-            if (std::string_view(argv[1]) == "--verify-webrtc") {
+            const std::string_view command(argv[1]);
+            if (command == "--verify-webrtc" || command == "--verify-echo") {
                 auto transition = TestTransition::none;
                 auto input = CoreAudioInput::default_device;
                 for (int index = 2; index < argc; ++index) {
@@ -349,10 +481,13 @@ int main(int argc, [[maybe_unused]] char** argv)
                         return 1;
                     }
                 }
-                return verify_webrtc(transition, input);
+                const auto echo = command == "--verify-echo" ? EchoCancellation::enabled
+                                                              : EchoCancellation::disabled;
+                return verify_webrtc(transition, input, echo);
             }
             std::cerr << "Usage: voice_gate_audio_probe "
-                         "[--verify-webrtc [--restart | --switch-output] [--built-in-mic]]\n";
+                         "[--verify-webrtc | --verify-echo] [--restart | --switch-output] "
+                         "[--built-in-mic]\n";
 #else
             std::cerr << "Build with VOICE_GATE_ENABLE_WEBRTC for WebRTC timing verification.\n";
 #endif
@@ -369,7 +504,7 @@ int main(int argc, [[maybe_unused]] char** argv)
         const float peak = probe.input_peak();
         std::cout << "input_peak=" << peak << '\n';
         if (!probe.input.valid() || !probe.output.valid() || peak == 0 ||
-            probe.output.total_frames < probe.tone.size() / formats.output.bytes_per_sample()) {
+            probe.output.total_frames < probe.playback.size() / formats.output.bytes_per_sample()) {
             std::cerr << "Probe did not verify capture, playback, and ordered device timestamps.\n";
             return 1;
         }

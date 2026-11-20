@@ -36,3 +36,5 @@ ctest --test-dir build-webrtc --output-on-failure
 On macOS, add `--restart` to run a second Core Audio session or `--switch-output` to check distinct default and system output routes.
 
 Use `--built-in-mic` with `--verify-webrtc` to select the physical microphone for the probe when macOS defaults to a virtual input.
+
+Run `./build-webrtc/voice_gate_audio_probe --verify-echo --built-in-mic` with speaker playback to measure local echo cancellation. The probe plays a quiet broadband fixture and reports the buffering delay and the reduction in microphone power on the same frames.
