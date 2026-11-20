@@ -13,6 +13,7 @@ add_library(voice_gate_audio
     src/audio/frame_handoff.cpp
     src/audio/local_activation.cpp
     src/audio/pcm.cpp
+    src/audio/playback_queue.cpp
 )
 target_include_directories(voice_gate_audio PUBLIC src)
 target_compile_features(voice_gate_audio PUBLIC cxx_std_20)
@@ -79,6 +80,10 @@ if(BUILD_TESTING)
     add_executable(voice_gate_local_activation_test tests/local_activation_test.cpp)
     target_link_libraries(voice_gate_local_activation_test PRIVATE voice_gate_audio)
     add_test(NAME local_activation COMMAND voice_gate_local_activation_test)
+
+    add_executable(voice_gate_playback_queue_test tests/playback_queue_test.cpp)
+    target_link_libraries(voice_gate_playback_queue_test PRIVATE voice_gate_audio)
+    add_test(NAME playback_queue COMMAND voice_gate_playback_queue_test)
 
     add_executable(voice_gate_segment_test tests/segment_controller_test.cpp)
     target_link_libraries(voice_gate_segment_test PRIVATE voice_gate_segment)
