@@ -67,6 +67,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install libcurl development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libcurl4-openssl-dev
+
       - name: Build pinned WebRTC media dependencies
         run: ./tools/build_webrtc_media.sh
 
