@@ -38,3 +38,11 @@ On macOS, add `--restart` to run a second Core Audio session or `--switch-output
 Use `--built-in-mic` with `--verify-webrtc` to select the physical microphone for the probe when macOS defaults to a virtual input.
 
 Run `./build-webrtc/voice_gate_audio_probe --verify-echo --built-in-mic` with speaker playback to measure local echo cancellation. The probe plays a quiet broadband fixture and reports the buffering delay and the reduction in microphone power on the same frames.
+
+## Test GPT Live signaling
+
+The local signaling service exchanges WebRTC offers and answers using a server-side API key. Its tests use a simulated provider and require no credentials.
+
+```sh
+python3 -B -m unittest discover -s server -v
+```
