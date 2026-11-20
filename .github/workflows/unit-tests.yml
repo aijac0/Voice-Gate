@@ -49,3 +49,7 @@ jobs:
 
       - name: Run CTest
         run: ctest --test-dir build --output-on-failure --no-tests=error
+
+      - name: Run trusted signaling tests
+        if: matrix.runner == 'ubuntu-24.04'
+        run: python3 -B -m unittest discover -s server -v
