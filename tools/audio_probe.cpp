@@ -1,5 +1,6 @@
 #include "audio/macos/core_audio_backend.h"
 #include "audio/pcm.h"
+#include "audio/playback_queue.h"
 
 #ifdef VOICE_GATE_ENABLE_WEBRTC
 #include "audio/audio_pipeline.h"
@@ -16,9 +17,9 @@
 #include <iostream>
 #include <numbers>
 #include <numeric>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
-#include <utility>
 #include <vector>
 
 namespace {
@@ -72,11 +73,10 @@ struct Timing {
     AudioTime first_callback{};
 };
 
-std::vector<std::byte> make_tone(const StreamFormat& format)
+std::vector<float> make_tone(const StreamFormat& format)
 {
     const auto frames = static_cast<std::size_t>(format.sample_rate);
-    const auto stride = format.bytes_per_sample();
-    std::vector<std::byte> tone(frames * stride);
+    std::vector<float> tone(frames);
     for (std::size_t frame = 0; frame < frames; ++frame) {
         const double t = frame / format.sample_rate;
         double sample = 0;
@@ -84,7 +84,7 @@ std::vector<std::byte> make_tone(const StreamFormat& format)
             const double envelope = std::min({1.0, (t - 0.25) / 0.01, (0.75 - t) / 0.01});
             sample = 0.035 * envelope * std::sin(2.0 * std::numbers::pi * 440.0 * (t - 0.25));
         }
-        write_sample(tone.data() + frame * stride, format.encoding, static_cast<float>(sample));
+        tone[frame] = static_cast<float>(sample);
     }
     return tone;
 }
@@ -95,11 +95,15 @@ struct Probe {
     {
     }
 
-    Probe(CoreAudioBackend& backend, DeviceFormats formats, std::vector<std::byte> playback)
-        : backend(backend), formats(formats), playback(std::move(playback)),
+    Probe(CoreAudioBackend& backend, DeviceFormats formats, const std::vector<float>& fixture)
+        : backend(backend), formats(formats), playback(formats.output, fixture.size()),
+          playback_frames(fixture.size()),
           captured(static_cast<std::size_t>(2 * formats.input.sample_rate) *
                    formats.input.bytes_per_sample())
     {
+        if (!playback.enqueue(fixture)) {
+            throw std::runtime_error("Could not queue the playback fixture");
+        }
     }
 
     static void capture(void* context, const InputBlock& block) noexcept
@@ -119,24 +123,8 @@ struct Probe {
     static void render(void* context, const OutputBlock& block) noexcept
     {
         auto& probe = *static_cast<Probe*>(context);
-        const auto first_frame = probe.output.total_frames;
         probe.output.observe(block.first_sample, probe.backend.now(), block.frames);
-        const auto stride = probe.formats.output.bytes_per_sample();
-        const auto playback_frames = probe.playback.size() / stride;
-        for (const auto& buffer : block.buffers) {
-            for (std::size_t frame = 0; frame < block.frames; ++frame) {
-                const auto playback_frame = first_frame + frame;
-                auto* destination = buffer.bytes.data() + frame * buffer.channels * stride;
-                if (playback_frame >= playback_frames) {
-                    std::memset(destination, 0, buffer.channels * stride);
-                    continue;
-                }
-                for (unsigned channel = 0; channel < buffer.channels; ++channel) {
-                    std::memcpy(destination + channel * stride,
-                                probe.playback.data() + playback_frame * stride, stride);
-                }
-            }
-        }
+        probe.playback.render(block);
     }
 
     [[nodiscard]] float input_peak() const noexcept
@@ -152,7 +140,8 @@ struct Probe {
 
     CoreAudioBackend& backend;
     DeviceFormats formats;
-    std::vector<std::byte> playback;
+    PlaybackQueue playback;
+    std::size_t playback_frames;
     std::vector<std::byte> captured;
     std::size_t captured_bytes{};
     Timing input;
@@ -160,11 +149,10 @@ struct Probe {
 };
 
 #ifdef VOICE_GATE_ENABLE_WEBRTC
-std::vector<std::byte> make_echo_fixture(const StreamFormat& format)
+std::vector<float> make_echo_fixture(const StreamFormat& format)
 {
     const auto frames = static_cast<std::size_t>(5 * format.sample_rate);
-    const auto stride = format.bytes_per_sample();
-    std::vector<std::byte> playback(frames * stride);
+    std::vector<float> playback(frames);
     std::uint32_t seed = 0xbd14a869;
     float smoothed = 0.0F;
     for (std::size_t frame = 0; frame < frames; ++frame) {
@@ -177,7 +165,7 @@ std::vector<std::byte> make_echo_fixture(const StreamFormat& format)
             const auto ramp = std::min({1.0, (seconds - 0.5) / 0.05, (4.5 - seconds) / 0.05});
             sample = static_cast<float>(0.16 * ramp) * smoothed;
         }
-        write_sample(playback.data() + frame * stride, format.encoding, sample);
+        playback[frame] = sample;
     }
     return playback;
 }
@@ -504,7 +492,7 @@ int main(int argc, [[maybe_unused]] char** argv)
         const float peak = probe.input_peak();
         std::cout << "input_peak=" << peak << '\n';
         if (!probe.input.valid() || !probe.output.valid() || peak == 0 ||
-            probe.output.total_frames < probe.playback.size() / formats.output.bytes_per_sample()) {
+            probe.output.total_frames < probe.playback_frames) {
             std::cerr << "Probe did not verify capture, playback, and ordered device timestamps.\n";
             return 1;
         }

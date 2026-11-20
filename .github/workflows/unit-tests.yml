@@ -20,8 +20,10 @@ jobs:
         include:
           - runner: ubuntu-24.04
             webrtc: 'OFF'
+            cxx_flags: '-fsanitize=address,undefined -fno-omit-frame-pointer'
           - runner: macos-15
             webrtc: 'ON'
+            cxx_flags: ''
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,7 +44,8 @@ jobs:
       - name: Configure CMake
         env:
           WEBRTC: ${{ matrix.webrtc }}
-        run: cmake -S . -B build -DBUILD_TESTING=ON -DVOICE_GATE_ENABLE_WEBRTC="$WEBRTC"
+          CXX_FLAGS: ${{ matrix.cxx_flags }}
+        run: cmake -S . -B build -DBUILD_TESTING=ON -DVOICE_GATE_ENABLE_WEBRTC="$WEBRTC" -DCMAKE_CXX_FLAGS="$CXX_FLAGS"
 
       - name: Build tests
         run: cmake --build build --parallel
@@ -53,3 +56,31 @@ jobs:
       - name: Run trusted signaling tests
         if: matrix.runner == 'ubuntu-24.04'
         run: python3 -B -m unittest discover -s server -v
+
+  web-rtc-loopback:
+    name: Native WebRTC loopback (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install libcurl development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libcurl4-openssl-dev
+
+      - name: Build pinned WebRTC media dependencies
+        run: ./tools/build_webrtc_media.sh
+
+      - name: Configure native media
+        run: |
+          cmake -S . -B build-transport -DVOICE_GATE_ENABLE_WEBRTC_MEDIA=ON \
+            -DCMAKE_PREFIX_PATH="$PWD/build-native-webrtc/install/datachannel;$PWD/build-native-webrtc/install/opus;$PWD/build-native-webrtc/install/json"
+
+      - name: Build and test the local peer connection
+        run: |
+          cmake --build build-transport --target voice_gate_webrtc_loopback_test voice_gate_signaling_client_test voice_gate_live_probe --parallel
+          ctest --test-dir build-transport --output-on-failure --no-tests=error -R '^(webrtc_loopback|signaling_client)$'
