@@ -3,7 +3,11 @@ project(VoiceGate LANGUAGES CXX)
 
 include(CTest)
 
-add_library(voice_gate_audio src/audio/audio_backend.cpp src/audio/pcm.cpp)
+add_library(voice_gate_audio
+    src/audio/audio_backend.cpp
+    src/audio/audio_queue.cpp
+    src/audio/pcm.cpp
+)
 target_include_directories(voice_gate_audio PUBLIC src)
 target_compile_features(voice_gate_audio PUBLIC cxx_std_20)
 set_target_properties(voice_gate_audio PROPERTIES CXX_EXTENSIONS OFF)
@@ -16,4 +20,10 @@ if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     add_executable(voice_gate_audio_probe tools/audio_probe.cpp)
     target_link_libraries(voice_gate_audio_probe PRIVATE voice_gate_audio)
     set_target_properties(voice_gate_audio_probe PROPERTIES CXX_EXTENSIONS OFF)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(voice_gate_audio_queue_test tests/audio_queue_test.cpp)
+    target_link_libraries(voice_gate_audio_queue_test PRIVATE voice_gate_audio)
+    add_test(NAME audio_queue COMMAND voice_gate_audio_queue_test)
 endif()
