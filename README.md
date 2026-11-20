@@ -6,7 +6,7 @@ During the pause, Voice Gate checks for sound on your device. When it detects so
 
 GPT Live bills for connected time, including silence, so disconnecting during pauses can reduce idle costs.
 
-Sprint One implements the macOS audio capture and output reference prototype.
+Voice Gate is in active design, implementation, and testing.
 
 ## Build and test
 
@@ -33,8 +33,6 @@ ctest --test-dir build-webrtc --output-on-failure
 ./build-webrtc/voice_gate_audio_probe --verify-webrtc
 ```
 
-Add `--restart` to the last command to run a second Core Audio session with the same frame format. When the Mac has distinct default and system output devices, use `--switch-output` to verify both routes. The probe retains the startup WebRTC sample rate and channel counts through either transition.
+On macOS, add `--restart` to run a second Core Audio session or `--switch-output` to check distinct default and system output routes.
 
 Use `--built-in-mic` with `--verify-webrtc` to select the physical microphone for the probe when macOS defaults to a virtual input.
-
-The shared C++ code in `src/audio` copies audio into bounded queues, assembles timed frames, and submits the playback reference before microphone audio. The macOS backend in `src/audio/macos` handles device formats, callbacks, and shutdown. The WebRTC tests use the module with its audio effects disabled.
