@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 using namespace voice_gate::audio;
@@ -91,6 +92,21 @@ void gap_and_restart()
             "restart establishes a fresh time origin");
 }
 
+void normalize_pcm()
+{
+    FrameAssembler mono({48000, 1});
+    std::vector<float> samples(480, 0.25F);
+    samples[0] = 1.5F;
+    samples[1] = -1.5F;
+    samples[2] = std::numeric_limits<float>::quiet_NaN();
+    require(mono.ingest(block(samples, 48000, 1, 100ms)) == IngestResult::accepted,
+            "convert native float PCM");
+    const auto frame = mono.take_frame();
+    require(frame && frame->samples[0][0] == 1.0F && frame->samples[0][1] == -1.0F &&
+                frame->samples[0][2] == 0.0F,
+            "supply finite normalized PCM to WebRTC");
+}
+
 }  // namespace
 
 int main()
@@ -99,6 +115,7 @@ int main()
         callback_boundaries();
         format_change();
         gap_and_restart();
+        normalize_pcm();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

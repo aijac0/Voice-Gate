@@ -48,6 +48,7 @@ using OutputBlock = DeviceBlock<std::byte>;
 struct DeviceCallbacks {
     void* context;
     // Block memory belongs to the device and is valid only during the call.
+    // Capture and render can run concurrently when they use separate devices.
     void (*capture)(void*, const InputBlock&) noexcept;
     void (*render)(void*, const OutputBlock&) noexcept;
 };
@@ -56,6 +57,7 @@ class AudioBackend {
 public:
     virtual ~AudioBackend() = default;
 
+    // Serialize lifecycle operations on the control thread.
     [[nodiscard]] virtual DeviceFormats open() = 0;
     virtual void start(DeviceCallbacks callbacks) = 0;
     virtual void stop() = 0;

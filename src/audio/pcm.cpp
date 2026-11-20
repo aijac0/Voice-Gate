@@ -27,8 +27,10 @@ void store(std::byte* destination, Value value) noexcept
 float read_sample(const std::byte* sample, SampleEncoding encoding) noexcept
 {
     switch (encoding) {
-    case SampleEncoding::float32:
-        return load<float>(sample);
+    case SampleEncoding::float32: {
+        const auto level = load<float>(sample);
+        return std::isfinite(level) ? std::clamp(level, -1.0F, 1.0F) : 0.0F;
+    }
     case SampleEncoding::signed16:
         return static_cast<float>(load<std::int16_t>(sample)) / 32768.0F;
     case SampleEncoding::signed32:
