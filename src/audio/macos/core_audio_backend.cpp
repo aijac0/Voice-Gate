@@ -26,6 +26,11 @@ void check(OSStatus status, const char* operation)
     }
 }
 
+bool device_disappeared(OSStatus status) noexcept
+{
+    return status == kAudioHardwareBadObjectError || status == kAudioHardwareBadDeviceError;
+}
+
 template <typename Value>
 Value read_property(AudioObjectID object, Property property, const char* operation)
 {
@@ -237,6 +242,7 @@ struct CoreAudioBackend::State {
     std::atomic<bool> accepting{false};
     std::atomic<unsigned> in_flight{0};
     bool opened{};
+    AudioObjectPropertySelector output_selector{kAudioHardwarePropertyDefaultOutputDevice};
 };
 
 CoreAudioBackend::CoreAudioBackend() : state_(std::make_unique<State>())
@@ -256,11 +262,19 @@ CoreAudioBackend::~CoreAudioBackend()
 
 DeviceFormats CoreAudioBackend::open()
 {
+    return open(CoreAudioOutput::default_device);
+}
+
+DeviceFormats CoreAudioBackend::open(CoreAudioOutput route)
+{
     stop();
     auto& state = *state_;
     state.opened = false;
     const auto input = default_device(kAudioHardwarePropertyDefaultInputDevice);
-    const auto output = default_device(kAudioHardwarePropertyDefaultOutputDevice);
+    state.output_selector = route == CoreAudioOutput::system_device
+        ? kAudioHardwarePropertyDefaultSystemOutputDevice
+        : kAudioHardwarePropertyDefaultOutputDevice;
+    const auto output = default_device(state.output_selector);
     state.input_layout = read_layout(input, kAudioObjectPropertyScopeInput);
     state.output_layout = read_layout(output, kAudioObjectPropertyScopeOutput);
     state.input_views.resize(state.input_layout.buffer_channels.size());
@@ -317,13 +331,16 @@ void CoreAudioBackend::stop()
             const auto status = AudioDeviceStop(registration->device, registration->handle);
             if (status == noErr) {
                 registration->running = false;
+            } else if (device_disappeared(status)) {
+                registration->running = false;
+                registration->handle = nullptr;
             } else if (first_error == noErr) {
                 first_error = status;
             }
         }
         if (registration->handle && !registration->running) {
             const auto status = AudioDeviceDestroyIOProcID(registration->device, registration->handle);
-            if (status == noErr) {
+            if (status == noErr || device_disappeared(status)) {
                 registration->handle = nullptr;
             } else if (first_error == noErr) {
                 first_error = status;
@@ -345,14 +362,22 @@ AudioTime CoreAudioBackend::now() const noexcept
 bool CoreAudioBackend::configuration_changed() const
 {
     const auto& state = *state_;
-    const auto input = default_device(kAudioHardwarePropertyDefaultInputDevice);
-    const auto output = default_device(kAudioHardwarePropertyDefaultOutputDevice);
-    const auto opened_output = state.registrations[0].output
-        ? state.registrations[0].device
-        : state.registrations[1].device;
-    return input != state.registrations[0].device || output != opened_output ||
-           read_layout(input, kAudioObjectPropertyScopeInput) != state.input_layout ||
-           read_layout(output, kAudioObjectPropertyScopeOutput) != state.output_layout;
+    try {
+        const auto input = default_device(kAudioHardwarePropertyDefaultInputDevice);
+        const auto output = default_device(state.output_selector);
+        return input != state.registrations[0].device || output != output_device_id() ||
+               read_layout(input, kAudioObjectPropertyScopeInput) != state.input_layout ||
+               read_layout(output, kAudioObjectPropertyScopeOutput) != state.output_layout;
+    } catch (const std::runtime_error&) {
+        // A device can disappear before the new default route is available.
+        return true;
+    }
+}
+
+unsigned CoreAudioBackend::output_device_id() const noexcept
+{
+    const auto& registrations = state_->registrations;
+    return registrations[0].output ? registrations[0].device : registrations[1].device;
 }
 
 }  // namespace voice_gate::audio
