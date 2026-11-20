@@ -4,6 +4,8 @@
 #ifdef VOICE_GATE_ENABLE_WEBRTC
 #include "audio/audio_pipeline.h"
 #include "audio/webrtc_processor.h"
+
+#include <CoreFoundation/CoreFoundation.h>
 #endif
 
 #include <algorithm>
@@ -204,6 +206,10 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
     auto last_input = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() < deadline) {
         const auto now = std::chrono::steady_clock::now();
+        if (backend.configuration_change_pending()) {
+            epoch.restart = "device-format-change";
+            break;
+        }
         if (now >= next_check) {
             if (backend.configuration_changed()) {
                 epoch.restart = "device-format-change";
@@ -227,7 +233,10 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
             epoch.restart = batch.restart_required ? "audio-discontinuity" : "audio-stalled";
             break;
         }
-        std::this_thread::sleep_for(2ms);
+        const auto wake = std::chrono::steady_clock::now() + 2ms;
+        // The HAL delivers property-listener notifications on the main run loop.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.002, true);
+        std::this_thread::sleep_until(wake);
     }
     backend.stop();
     epoch.input_peak = fixture.input_peak();
@@ -255,11 +264,12 @@ Epoch run_epoch(CoreAudioBackend& backend, DeviceFormats devices, FrameFormat in
 }
 
 DeviceFormats wait_for_devices(CoreAudioBackend& backend, CoreAudioOutput output,
+                               CoreAudioInput input,
                                std::chrono::steady_clock::time_point deadline)
 {
     for (;;) {
         try {
-            return backend.open(output);
+            return backend.open(output, input);
         } catch (const std::runtime_error&) {
             if (std::chrono::steady_clock::now() >= deadline) {
                 throw;
@@ -271,10 +281,10 @@ DeviceFormats wait_for_devices(CoreAudioBackend& backend, CoreAudioOutput output
 
 enum class TestTransition { none, restart, switch_output };
 
-int verify_webrtc(TestTransition transition)
+int verify_webrtc(TestTransition transition, CoreAudioInput input_route)
 {
     CoreAudioBackend backend;
-    auto devices = backend.open();
+    auto devices = backend.open(CoreAudioOutput::default_device, input_route);
     const auto initial_output = backend.output_device_id();
     const FrameFormat input{48000, devices.input.channels};
     const FrameFormat reference{48000, devices.output.channels};
@@ -292,7 +302,7 @@ int verify_webrtc(TestTransition transition)
                 throw std::runtime_error("Repeated audio interruption prevented verification");
             }
             if (generation > 1) {
-                devices = wait_for_devices(backend, output, deadline);
+                devices = wait_for_devices(backend, output, input_route, deadline);
             }
             if (output == CoreAudioOutput::system_device &&
                 backend.output_device_id() == initial_output) {
@@ -324,17 +334,25 @@ int main(int argc, [[maybe_unused]] char** argv)
         if (argc > 1) {
 #ifdef VOICE_GATE_ENABLE_WEBRTC
             if (std::string_view(argv[1]) == "--verify-webrtc") {
-                if (argc == 2) {
-                    return verify_webrtc(TestTransition::none);
+                auto transition = TestTransition::none;
+                auto input = CoreAudioInput::default_device;
+                for (int index = 2; index < argc; ++index) {
+                    const std::string_view argument(argv[index]);
+                    if (argument == "--built-in-mic" && input == CoreAudioInput::default_device) {
+                        input = CoreAudioInput::built_in;
+                    } else if (argument == "--restart" && transition == TestTransition::none) {
+                        transition = TestTransition::restart;
+                    } else if (argument == "--switch-output" && transition == TestTransition::none) {
+                        transition = TestTransition::switch_output;
+                    } else {
+                        std::cerr << "Unknown or conflicting audio probe option: " << argument << '\n';
+                        return 1;
+                    }
                 }
-                if (argc == 3 && std::string_view(argv[2]) == "--restart") {
-                    return verify_webrtc(TestTransition::restart);
-                }
-                if (argc == 3 && std::string_view(argv[2]) == "--switch-output") {
-                    return verify_webrtc(TestTransition::switch_output);
-                }
+                return verify_webrtc(transition, input);
             }
-            std::cerr << "Usage: voice_gate_audio_probe [--verify-webrtc [--restart | --switch-output]]\n";
+            std::cerr << "Usage: voice_gate_audio_probe "
+                         "[--verify-webrtc [--restart | --switch-output] [--built-in-mic]]\n";
 #else
             std::cerr << "Build with VOICE_GATE_ENABLE_WEBRTC for WebRTC timing verification.\n";
 #endif

@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace voice_gate::audio {
@@ -55,6 +56,41 @@ AudioDeviceID default_device(AudioObjectPropertySelector selector)
     return device;
 }
 
+AudioDeviceID built_in_input()
+{
+    const Property devices_property{kAudioHardwarePropertyDevices,
+                                    kAudioObjectPropertyScopeGlobal,
+                                    kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    check(AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &devices_property, 0,
+                                        nullptr, &size),
+          "Read the Core Audio device list size");
+    std::vector<AudioDeviceID> devices(size / sizeof(AudioDeviceID));
+    if (!devices.empty()) {
+        check(AudioObjectGetPropertyData(kAudioObjectSystemObject, &devices_property, 0,
+                                         nullptr, &size, devices.data()),
+              "Read the Core Audio device list");
+        devices.resize(size / sizeof(AudioDeviceID));
+    }
+    const Property transport{kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal,
+                             kAudioObjectPropertyElementMain};
+    const Property streams{kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput,
+                           kAudioObjectPropertyElementMain};
+    for (const auto device : devices) {
+        UInt32 transport_type = 0;
+        UInt32 transport_size = sizeof(transport_type);
+        UInt32 stream_size = 0;
+        if (AudioObjectGetPropertyData(device, &transport, 0, nullptr, &transport_size,
+                                       &transport_type) == noErr &&
+            transport_type == kAudioDeviceTransportTypeBuiltIn &&
+            AudioObjectGetPropertyDataSize(device, &streams, 0, nullptr, &stream_size) == noErr &&
+            stream_size > 0) {
+            return device;
+        }
+    }
+    throw std::runtime_error("No built-in Core Audio input device is available");
+}
+
 SampleEncoding sample_encoding(const AudioStreamBasicDescription& stream)
 {
     const auto flags = stream.mFormatFlags;
@@ -82,6 +118,7 @@ SampleEncoding sample_encoding(const AudioStreamBasicDescription& stream)
 
 struct DeviceLayout {
     StreamFormat format{};
+    std::vector<AudioStreamID> streams;
     std::vector<unsigned> buffer_channels;
     bool operator==(const DeviceLayout&) const = default;
 };
@@ -147,6 +184,7 @@ DeviceLayout read_layout(AudioDeviceID device, AudioObjectPropertyScope scope)
     if (layout.format.channels == 0) {
         throw std::runtime_error("The audio stream list changed while opening the device");
     }
+    layout.streams = std::move(streams);
     return layout;
 }
 
@@ -194,6 +232,12 @@ std::optional<DeviceBlock<Byte>> make_block(const DeviceLayout& layout,
 }  // namespace
 
 struct CoreAudioBackend::State {
+    struct PropertyWatch {
+        AudioObjectID object;
+        Property address;
+        bool installed{};
+    };
+
     struct Registration {
         State* state{};
         AudioDeviceID device{kAudioObjectUnknown};
@@ -203,28 +247,40 @@ struct CoreAudioBackend::State {
         bool running{};
     };
 
+    static OSStatus on_configuration_change(AudioObjectID, UInt32, const Property*,
+                                            void* context) noexcept
+    {
+        static_cast<State*>(context)->configuration_invalid.store(true);
+        return noErr;
+    }
+
+    [[nodiscard]] bool forwarding_audio() const noexcept
+    {
+        return accepting.load() && !configuration_invalid.load();
+    }
+
     static OSStatus io(AudioDeviceID, const AudioTimeStamp*, const AudioBufferList* input,
                        const AudioTimeStamp* input_time, AudioBufferList* output,
                        const AudioTimeStamp* output_time, void* context) noexcept
     {
         auto& registration = *static_cast<Registration*>(context);
         State& state = *registration.state;
-        if (!state.accepting.load()) {
+        if (!state.forwarding_audio()) {
             return noErr;
         }
         state.in_flight.fetch_add(1);
-        if (state.accepting.load()) {
+        if (state.forwarding_audio()) {
             if (registration.input && state.callbacks.capture) {
                 const auto block = make_block(state.input_layout, std::span(state.input_views),
                                               input, input_time);
-                if (block) {
+                if (block && state.forwarding_audio()) {
                     state.callbacks.capture(state.callbacks.context, *block);
                 }
             }
             if (registration.output && state.callbacks.render) {
                 const auto block = make_block(state.output_layout, std::span(state.output_views),
                                               output, output_time);
-                if (block) {
+                if (block && state.forwarding_audio()) {
                     state.callbacks.render(state.callbacks.context, *block);
                 }
             }
@@ -238,10 +294,13 @@ struct CoreAudioBackend::State {
     std::vector<BufferView<const std::byte>> input_views;
     std::vector<BufferView<std::byte>> output_views;
     std::array<Registration, 2> registrations{};
+    std::vector<PropertyWatch> watches;
     DeviceCallbacks callbacks{};
     std::atomic<bool> accepting{false};
+    std::atomic<bool> configuration_invalid{false};
     std::atomic<unsigned> in_flight{0};
     bool opened{};
+    bool follows_default_input{true};
     AudioObjectPropertySelector output_selector{kAudioHardwarePropertyDefaultOutputDevice};
 };
 
@@ -265,12 +324,15 @@ DeviceFormats CoreAudioBackend::open()
     return open(CoreAudioOutput::default_device);
 }
 
-DeviceFormats CoreAudioBackend::open(CoreAudioOutput route)
+DeviceFormats CoreAudioBackend::open(CoreAudioOutput route, CoreAudioInput input_route)
 {
     stop();
     auto& state = *state_;
     state.opened = false;
-    const auto input = default_device(kAudioHardwarePropertyDefaultInputDevice);
+    state.follows_default_input = input_route == CoreAudioInput::default_device;
+    const auto input = state.follows_default_input
+        ? default_device(kAudioHardwarePropertyDefaultInputDevice)
+        : built_in_input();
     state.output_selector = route == CoreAudioOutput::system_device
         ? kAudioHardwarePropertyDefaultSystemOutputDevice
         : kAudioHardwarePropertyDefaultOutputDevice;
@@ -284,6 +346,26 @@ DeviceFormats CoreAudioBackend::open(CoreAudioOutput route)
     if (input != output) {
         state.registrations[1] = {&state, output, false, true};
     }
+    state.watches = {
+        {kAudioObjectSystemObject, {state.output_selector,
+                                  kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}},
+        {input, {kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput,
+                 kAudioObjectPropertyElementMain}},
+        {output, {kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput,
+                  kAudioObjectPropertyElementMain}},
+    };
+    if (state.follows_default_input) {
+        state.watches.push_back({kAudioObjectSystemObject,
+                                 {kAudioHardwarePropertyDefaultInputDevice,
+                                  kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}});
+    }
+    for (const auto* layout : {&state.input_layout, &state.output_layout}) {
+        for (const auto stream : layout->streams) {
+            state.watches.push_back({stream, {kAudioStreamPropertyVirtualFormat,
+                                             kAudioObjectPropertyScopeGlobal,
+                                             kAudioObjectPropertyElementMain}});
+        }
+    }
     const auto input_max_frames = max_frames(input);
     const auto output_max_frames = input == output ? input_max_frames : max_frames(output);
     state.opened = true;
@@ -294,11 +376,24 @@ DeviceFormats CoreAudioBackend::open(CoreAudioOutput route)
 void CoreAudioBackend::start(DeviceCallbacks callbacks)
 {
     auto& state = *state_;
-    if (!state.opened || state.registrations[0].handle || state.registrations[1].handle) {
+    const bool watches_installed = std::any_of(state.watches.begin(), state.watches.end(),
+        [](const State::PropertyWatch& watch) { return watch.installed; });
+    if (!state.opened || state.registrations[0].handle ||
+        state.registrations[1].handle || watches_installed) {
         throw std::logic_error("Open the Core Audio backend and stop any active run before starting");
     }
     state.callbacks = callbacks;
+    state.configuration_invalid.store(false);
     try {
+        for (auto& watch : state.watches) {
+            check(AudioObjectAddPropertyListener(watch.object, &watch.address,
+                                                 State::on_configuration_change, &state),
+                  "Watch Core Audio device and stream changes");
+            watch.installed = true;
+        }
+        if (configuration_changed()) {
+            throw std::runtime_error("Core Audio configuration changed during startup");
+        }
         for (auto& registration : state.registrations) {
             if (registration.device != kAudioObjectUnknown) {
                 check(AudioDeviceCreateIOProcID(registration.device, State::io, &registration,
@@ -347,6 +442,17 @@ void CoreAudioBackend::stop()
             }
         }
     }
+    for (auto& watch : state.watches) {
+        if (watch.installed) {
+            const auto status = AudioObjectRemovePropertyListener(
+                watch.object, &watch.address, State::on_configuration_change, &state);
+            if (status == noErr || device_disappeared(status)) {
+                watch.installed = false;
+            } else if (first_error == noErr) {
+                first_error = status;
+            }
+        }
+    }
     while (state.in_flight.load() != 0) {
         std::this_thread::yield();
     }
@@ -361,9 +467,14 @@ AudioTime CoreAudioBackend::now() const noexcept
 
 bool CoreAudioBackend::configuration_changed() const
 {
+    if (configuration_change_pending()) {
+        return true;
+    }
     const auto& state = *state_;
     try {
-        const auto input = default_device(kAudioHardwarePropertyDefaultInputDevice);
+        const auto input = state.follows_default_input
+            ? default_device(kAudioHardwarePropertyDefaultInputDevice)
+            : state.registrations[0].device;
         const auto output = default_device(state.output_selector);
         return input != state.registrations[0].device || output != output_device_id() ||
                read_layout(input, kAudioObjectPropertyScopeInput) != state.input_layout ||
@@ -372,6 +483,11 @@ bool CoreAudioBackend::configuration_changed() const
         // A device can disappear before the new default route is available.
         return true;
     }
+}
+
+bool CoreAudioBackend::configuration_change_pending() const noexcept
+{
+    return state_->configuration_invalid.load();
 }
 
 unsigned CoreAudioBackend::output_device_id() const noexcept

@@ -35,4 +35,6 @@ ctest --test-dir build-webrtc --output-on-failure
 
 Add `--restart` to the last command to run a second Core Audio session with the same frame format. When the Mac has distinct default and system output devices, use `--switch-output` to verify both routes. The probe retains the startup WebRTC sample rate and channel counts through either transition.
 
+Use `--built-in-mic` with `--verify-webrtc` to select the physical microphone for the probe when macOS defaults to a virtual input.
+
 The shared C++ code in `src/audio` copies audio into bounded queues, assembles timed frames, and submits the playback reference before microphone audio. The macOS backend in `src/audio/macos` handles device formats, callbacks, and shutdown. The WebRTC tests use the module with its audio effects disabled.
